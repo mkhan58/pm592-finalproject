@@ -13,6 +13,7 @@ output:
 # **Introduction**
 For my final project, I selected the 1987 National Indonesia Contraceptive Prevalence Survey dataset. This dataset was listed on UC Irvine’s Machine Learning Repository. There were no missing values or discrepancies however there is not a complete data dictionary. The dataset was sampled by surveying married women and their contraceptive method choice in Indonesia. The sample size is 1,473 respondents. There are ten variables that describe the woman’s age, education, religion, working status, contraceptive method, standard of living, media exposure as well as number of children and husband’s education and occupation. In this project, I observed the prediction of contraceptive methods based on the woman’s demographic and socioeconomic status. 
 
+Link to Github repository for code [Here](https://github.com/mkhan58/pm592-finalproject/blob/main/PM592_ProjectReport.Rmd)
 
 <br>
 
