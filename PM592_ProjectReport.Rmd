@@ -1,0 +1,859 @@
+---
+title: "PM592FinalProject"
+author: "Misha Khan"
+date: "2022-12-14"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+# **Introduction**
+For my final project, I selected the 1987 National Indonesia Contraceptive Prevalence Survey dataset. This dataset was listed on UC Irvine’s Machine Learning Repository. There were no missing values or discrepancies however there is not a complete data dictionary. The dataset was sampled by surveying married women and their contraceptive method choice in Indonesia. The sample size is 1,473 respondents. There are ten variables that describe the woman’s age, education, religion, working status, contraceptive method, standard of living, media exposure as well as number of children and husband’s education and occupation. In this project, I observed the prediction of contraceptive methods based on the woman’s demographic and socioeconomic status. 
+
+
+<br>
+
+
+# **Background**
+In 1987, fertility rates had rapidly fallen in Indonesia. On average, women were having 3.3 children versus 5.5 children two decades ago. The introduction of contraception use contributed to this drop of birth rates. Almost 95% of married women were familiar with contraceptive methods and were shifting their focus to structured family planning. 
+
+
+```{r libraries, message=FALSE, echo=FALSE, warning=FALSE}
+library(tidyverse)
+library(survival)
+library(survminer)
+library(survMisc)
+library(haven)
+library(lubridate)
+library(ggplot2)
+library(mfp)
+library(skimr)
+library(dplyr)
+library(MASS)
+library(sjPlot)
+library(qwraps2)
+library(vtable)
+library(DescTools)
+library(data.table)
+library(plotly)
+library(DT) 
+library(knitr)
+library(mfp)
+library(GGally)
+library(olsrr)
+suppressWarnings(library(kableExtra))
+
+source("plot_resid_lev_logistic.R")
+source("logit_plot.R")
+```
+
+```{r load, message=FALSE, echo=FALSE, warning=FALSE}
+cmc <- read.table("cmc.data", sep=",")
+```
+
+```{r changename, message=FALSE, echo=FALSE, warning=FALSE}
+colnames(cmc) <- c('Wife Age',
+                   'Wife Education',
+                   'Husband Education',
+                   'Number of Children',
+                   'Wife Religion',
+                   'Wife Working',
+                   'Husband Occupation', 
+                   'Standard of Living', 
+                   'Media Exposure',
+                   'Contraceptive')
+cmc.raw <- cmc
+```
+
+### Table 1: Descriptive Statistics
+```{r descstat, message=FALSE, echo=FALSE, warning=FALSE}
+sumtable(cmc)
+```
+
+```{r corr, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggpairs()
+```
+
+From the correlation matrix, number of children and wife's age has high positive correlation (0.54) as well as husband education and wife education (0.62).
+
+
+
+<br>
+
+
+#### Variable Assessment
+
+The distribution of wife's age is not normal so I centralized it for easier interpretation (wife_age.c).
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc <-
+  cmc %>%
+  mutate(
+    wife_age.c = `Wife Age` - mean(`Wife Age`, na.rm=T))
+```
+
+Wife's Age and Number of Children are discrete variables. The rest are categorical or binary variables so I factored these variables.
+For easier analysis, I changed the factoring of contraceptive method so that short term (2) and long term (3) are in one category.
+```{r factor, message=FALSE, echo=FALSE, warning=FALSE}
+#Assessing Categorical variables
+#Wife Education
+cmc$wife_education.f <- factor(cmc$`Wife Education`, 
+                               levels = c(1, 2, 3, 4), 
+                               labels = c("No education", "Some education", 
+                                          "Educated", "Higher education"))
+
+#Husband Education
+cmc$husband_education.f <- factor(cmc$`Husband Education`, 
+                                  levels = c(1, 2, 3, 4), 
+                                  labels = c("No education", "Some education", 
+                                             "Educated", "Higher education"))
+
+#Wife Religion
+cmc$wife_religion.f <- factor(cmc$`Wife Religion`, 
+                              levels = c(0, 1), 
+                              labels = c("Non Islam", "Islam"))
+
+#Wife Working
+cmc$wife_working.f <- factor(cmc$`Wife Working`, 
+                             levels = c(0, 1), 
+                             labels = c("Yes", "No"))
+
+#Husband Occupation
+cmc$husband_occupation.f <- factor(cmc$`Husband Occupation`, 
+                                   levels = c(1, 2, 3, 4))
+
+#Standard of Living
+cmc$sol.f <- factor(cmc$`Standard of Living`, 
+                    levels = c(1, 2, 3, 4), 
+                    labels = c("Poor", "Low", "Medium", "High"))
+
+#Media Exposure
+cmc$media_exposure.f <- factor(cmc$`Media Exposure`, 
+                               levels = c(0, 1), 
+                               labels = c("Good", "Not good"))
+
+#Contraceptive Method
+cmc$Contraceptive[(cmc$Contraceptive)=="1"] <-"0"
+cmc$Contraceptive[(cmc$Contraceptive)=="2"] <-"1"
+cmc$Contraceptive[(cmc$Contraceptive)=="3"] <-"1"
+cmc$contra.f <- factor(cmc$`Contraceptive`, 
+                       levels = c(0, 1))
+```
+
+<br>
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+prop.table(table(cmc$contra.f)) %>% knitr::kable()
+```
+At a highlevel, in the sample 42% do not use contraceptive methods while 57% of woman do.
+
+<br>
+
+
+### Table 2: Individual Relationships, Standard Errors, 95% CI, p-values
+#### 1. Wife Age vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  group_by(wife_age.c) %>%
+  summarise(contra_mean = mean(as.numeric(contra.f))) %>%
+  ggplot(aes(x = wife_age.c, y = contra_mean)) +
+  geom_point()
+```
+
+The graph shows a low then high then low pattern between wife's age and 
+contraception use. Near the mean of wife's age, which is 32, woman are more 
+likely to use contraception. The low and high end of the age ranges are 
+showing no contraception use. There is a violation of linearity here.
+
+
+Before modeling, I assessed the linearity of wife's age using MFP.
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+mfp(contra.f ~ fp(wife_age.c), data = cmc, family = binomial)
+```
+MFP suggests I(wife_age.c^2^) + I(wife_age.c^3^) transformation.
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, , results = 'hide'}
+#Simple Logistic Regression: Wife's Age and Contraceptive
+glm(
+  contra.f ~ wife_age.c,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+#Logistic Regression: Wife's Age and Contraceptive with Transformation
+glm(
+  contra.f ~ wife_age.c + I(wife_age.c^2) + I(wife_age.c^3),
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod1 <- glm( contra.f ~ wife_age.c, data = cmc,family = binomial)
+mod2 <- glm(contra.f ~ wife_age.c + I(wife_age.c^2) + I(wife_age.c^3), 
+            data = cmc, family = binomial)
+tab_model(mod1, mod2, show.se = TRUE, show.aic = TRUE)
+```
+After transformation, wife_age.c and wife_age.c^3^ are no longer significant. 
+Based off the earlier plot, I think a squared transformation of wife_age.c would 
+suffice.
+
+
+<br>
+
+
+#### 2. Wife Education vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(wife_education.f))) +
+  geom_bar()
+```
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(wife_education.f, contra.f)) %>% knitr::kable()
+```
+
+
+From the bar chart, there are more woman that have education that those that
+have little to none. The table shows woman with minimal education mostly do not 
+use contraceptive methods while woman with higher education mostly do use.
+
+<br>
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE,  results = 'hide'}
+#Simple Logistic Regression: Wife's Education and Contraceptive
+glm(
+  contra.f ~ wife_education.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod3 <-glm(
+  contra.f ~ wife_education.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod3, show.se = TRUE, show.aic = TRUE)
+```
+Wife's education is statistically related to contraceptive use. 
+
+
+<br>
+
+
+#### 3. Husband Education vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(husband_education.f))) +
+  geom_bar()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(husband_education.f, contra.f)) %>% knitr::kable()
+```
+
+
+
+The barchart show significantly more men with higher education in the sample.
+Men with higher education have wives that are more likely to use contraception.
+
+
+<br>
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+#Simple Logistic Regression: Husband's Education and Contraceptive
+glm(
+  contra.f ~ husband_education.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod4 <-glm(
+  contra.f ~ husband_education.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod4, show.se = TRUE, show.aic = TRUE)
+```
+Husband's education is statistically related to contraceptive use.
+
+<br>
+
+
+
+#### 4. Number of Children vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  group_by(`Number of Children`) %>%
+  summarise(contra_mean = mean(as.numeric(contra.f))) %>%
+  ggplot(aes(x = `Number of Children`, y = contra_mean)) +
+  geom_point()
+```
+
+
+Starting at 0 children, there is no contraception use. As the number of children
+increase, women are more likely to use contraception then it starts dropping
+after 5 children. Between 5-13 children, there is a decrease in contraception
+use. After 13, there is a spike in women using contraception. 
+
+Before modeling, I assessed the linearity of number of children using MFP.
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+mfp(contra.f ~ `Number of Children`, data = cmc, family = binomial)
+```
+The MFP results showed linear form of number of children is fine.
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ `Number of Children`,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod5 <-glm(
+  contra.f ~ `Number of Children`,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod5, show.se = TRUE, show.aic = TRUE)
+```
+
+
+
+<br>
+
+
+
+#### 5. Wife Religion vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(wife_religion.f))) +
+  geom_bar()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(wife_religion.f, contra.f))  %>% knitr::kable()
+```
+The barchart shows that most of the woman in the sample are Muslim. 
+Solely based of the table, more woman use contraception regardless of religion.
+
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ wife_religion.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod6 <-glm(
+  contra.f ~ wife_religion.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod6, show.se = TRUE, show.aic = TRUE)
+```
+Wife's religion is statistically related to contraceptive use.
+
+
+<br>
+
+
+
+#### 6. Wife Working vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(wife_working.f))) +
+  geom_bar()
+```
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(wife_working.f, contra.f))  %>% knitr::kable()
+```
+
+
+From the barchart, there are more woman in the sample that do not work. There 
+is not a huge difference in contraception use among woman who work (20) versus
+woman that do not work (186).
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ wife_working.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod7 <-glm(
+  contra.f ~ wife_working.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod7, show.se = TRUE, show.aic = TRUE)
+```
+Wife working is not statistically significant to contraceptive use. 
+This will be excluded from final model.
+
+
+<br>
+
+
+
+#### 7. Husband Occupation vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(husband_occupation.f))) +
+  geom_bar()
+```
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(husband_occupation.f, contra.f))  %>% knitr::kable()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ husband_occupation.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod8 <-glm(
+  contra.f ~ husband_occupation.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod8, show.se = TRUE, show.aic = TRUE)
+```
+Husband occupation is not statistically significant to contraceptive use.
+This will be excluded from final model.
+
+
+<br>
+
+
+
+#### 8. Standard of Living vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(sol.f))) +
+  geom_bar()
+```
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(sol.f, contra.f))  %>% knitr::kable()
+```
+
+More women in the sample have a high standard of living. Those with low or 
+poor are do not use contraception more than those with medium or high standard
+of living.
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ sol.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod9 <-glm(
+  contra.f ~ sol.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod9, show.se = TRUE, show.aic = TRUE)
+```
+Standard of living is statistically related to contraception use.
+
+
+<br>
+
+
+
+#### 9. Media Exposure vs Contraceptive
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+cmc %>%
+  ggplot(mapping = aes(x = factor(media_exposure.f))) +
+  geom_bar()
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+with(cmc, table(media_exposure.f, contra.f))  %>% knitr::kable()
+```
+
+The sample of woman mostly have good media exposure. Those with good media exposure
+use contraception more. Those with not good media exposure do not use contraception
+as much.
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE, results = 'hide'}
+glm(
+  contra.f ~ media_exposure.f,
+  data = cmc,
+  family = binomial
+) %>%
+  summary()
+```
+Media exposure is statistically related to contraceptive use.
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+mod10 <-glm(
+  contra.f ~ media_exposure.f,
+  data = cmc,
+  family = binomial
+)
+tab_model(mod10, show.se = TRUE, show.aic = TRUE)
+```
+Media exposure is statistically related to contraceptive use.
+
+###  Table 3: Final Model Selection, Confounding/Effect Modification, Diagnostics
+I wanted to run a model with all variables and no transformation (all_model) to see how it
+compares to the other model where I performed variable selection by univariate analysis (test_model).
+
+#### Model Selection
+**Model with all predictors versus**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#Model with all predictors versus
+all_model <- glm(contra.f ~
+                   wife_age.c +
+                   wife_education.f +
+                   husband_education.f +
+                   `Number of Children` +
+                   wife_religion.f +
+                   wife_working.f +
+                   husband_occupation.f +
+                   sol.f +
+                   media_exposure.f,
+                 data = cmc,
+                 family = binomial)
+#summary(all_model)
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#*Model with selected predictors and transformation
+test_model <- glm(contra.f ~ 
+                     I(wife_age.c^2) +
+                     wife_education.f +
+                     husband_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(test_model)
+```
+**Model with all predictors versus Model with selected predictors and transformation**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(all_model, test_model, show.aic = T)
+```
+
+Even after examining the predictors independently, the model with that selection
+and transformation of wife_age.c^2^ is worse than the model with all the predictors. 
+The AIC of the full model is 1798 while the test model is 24740. 
+
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#Model with with selected predictors (no age transformation)
+final_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(final_model)
+```
+**Model with all predictors versus Model with with selected predictors (no age transformation)**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(all_model, final_model, show.aic = T)
+```
+I performed another model with the linear term of wife_age.c instead of squared
+and the AIC is now 1792. Before I finalized my model, I observed confounding
+and effect modifiers.
+
+
+<br>
+
+
+####  Examining demographic confounding
+The criteria for confounding is at least a 10% change in estimates and variables
+must be sensibly a cause to both X and Y.
+
+#### 1. Wife's Age
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#Model without wife's age versus
+withoutage_model <- glm(contra.f ~ 
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withoutage_model)
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#Model with wife's age
+withage_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withage_model)
+```
+**Model without wife's age versus with wife's age**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(withoutage_model, withage_model, show.aic = T)
+```
+The are multiple beta % changes when wife's age is added to the model.
+Wife's age is a confounder.
+
+
+<br>
+
+
+#### 2. Wife's Education
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withoutedu_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     #wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withoutedu_model)
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withedu_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withedu_model)
+```
+**Model without wife's education versus with wife's education**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(withoutedu_model, withedu_model, show.aic = T)
+```
+The are multiple beta % changes when wife's education is added to the model.
+Wife's education is a confounder.
+
+<br>  
+
+
+#### 3. Number of Children
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withoutchild_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     #`Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withoutchild_model)
+```
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withchild_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+#summary(withchild_model)
+```
+
+**Model without number of children versus with number of children**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(withoutchild_model, withchild_model, show.aic = T)
+```
+The are multiple beta % changes when number of children is added to the model.
+Number of children is a confounder.
+
+<br>
+
+
+#### 4. Number of Religion
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withoutreligion_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     #wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withreligion_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                     sol.f +
+                     media_exposure.f,
+                   data = cmc,
+                   family = binomial)
+
+```
+
+**Model without wife's religion versus without wife's religion**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(withoutreligion_model, withreligion_model, show.aic = T)
+```
+Wife's religion does not heavily impact beta coefficients. It is not a confounder
+but is it significant in our model.
+
+
+<br>
+
+
+####  Examining effect modification
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+withint2_model <- glm(contra.f ~ 
+                     wife_age.c +
+                     wife_education.f +
+                     `Number of Children` +
+                     wife_religion.f +
+                      sol.f +
+                       media_exposure.f +
+                     wife_age.c*`Number of Children`,
+                   data = cmc,
+                   family = binomial)
+#summary(withint2_model)
+```
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(withint2_model, final_model, show.aic = T)
+```
+I observed the interaction effect between wife's age and number of children because 
+of the correlation matrix. The interaction term is significant in the model.
+The model with the interaction is shown to have a lower AIC than the model with
+only selected predictors and no transformation (1738 vs 1792). I selected the
+model with the interaction as my final model.
+
+
+<br>
+
+#### Diagnostics
+**Multicollinearity**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+DescTools::VIF(withint2_model)
+```
+
+There is no evidence of multicollinearity in the model.
+
+
+**McFadden R Squared**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+DescTools::PseudoR2(withint2_model)
+```
+
+According to McFadden, these predictors explain approximately  14.7% of the variation in contraceptive use.
+
+
+**Homer-Lemeshow GOF**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+library(ResourceSelection)
+hoslem.test(withint2_model$y, fitted(withint2_model), g = 10)
+```
+
+After running the GOF test, there is evidence of lack of fit (p = ~0.00).
+
+
+**Influential**
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+#LogisticDx::dx(withint2_model)
+plot_resid_lev_logistic(withint2_model)
+```
+
+There are no observations with significant influence and leverage.
+
+
+<br>
+
+
+# **Interpretation and Conclusion**
+A one unit increase in wife's age is associated with 0.98 times 
+the odds of contraceptive use.
+A one unit increase in number of children is associated with 1.61 times
+the odds of contraceptive use.
+A woman with higher education is associated with 4.28 times the odds than
+a woman with no education.
+A woman with a high standard of living index is associated with 2.1 times
+the odds than a woman with poor standard of living.
+
+Overall, a woman's age, education, religion, current number of children,
+standard of living, and media exposure can predict contraceptive use.
+From the diagnostics ran, the model can use improvement in terms of model fit 
+but there is no influential data points.
+
+
+
